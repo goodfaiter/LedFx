@@ -10,7 +10,7 @@ from ledfx.virtuals import update_effect_config
 
 _LOGGER = logging.getLogger(__name__)
 
-TOOLS = ["force_color", "calibration", "highlight", "oneshot", "copy"]
+TOOLS = ["force_color", "calibration", "highlight", "oneshot", "copy", "ripple", "wave"]
 
 
 class VirtualsToolsEndpoint(RestEndpoint):
@@ -112,16 +112,57 @@ class VirtualsToolsEndpoint(RestEndpoint):
             hold = data.get("hold", 0)
             fade = data.get("fade", 0)
 
-            if sum(ramp, hold, fade) == 0:
+            if ramp == 0 and hold == 0 and fade == 0:
                 return await self.invalid_request(
                     "At least one of ramp, hold or fade must be greater than 0"
                 )
 
+            brightness = data.get("brightness", 1.0)
+
             result = virtual.oneshot(
-                parse_color(validate_color(color)), ramp, hold, fade
+                parse_color(validate_color(color)), ramp, hold, fade, brightness
             )
             if result is False:
                 return await self.invalid_request("oneshot failed")
+
+        if tool == "ripple":
+            color = data.get("color")
+            if color is None:
+                return await self.invalid_request(
+                    "Required attribute for oneshot, color was not provided"
+                )
+
+            fade = data.get("fade", 0)
+
+            if fade <= 0:
+                return await self.invalid_request(
+                    "Fade must be greater than 0"
+                )
+
+            probability = 1.0 - data.get("probability", 0.1)
+
+            brightness = data.get("brightness", 1.0)
+
+            result = virtual.ripple(parse_color(validate_color(color)), fade, probability, brightness)
+            if result is False:
+                return await self.invalid_request("ripple failed")
+
+        if tool == "wave":
+            color = data.get("color")
+            if color is None:
+                return await self.invalid_request(
+                    "Required attribute for oneshot, color was not provided"
+                )
+
+            brightness = data.get("brightness", 1.0)
+
+            pixel_step = data.get("pixel_step", 1)
+
+            timestep = data.get("timestep", 0.05)
+
+            result = virtual.wave(parse_color(validate_color(color)), timestep, pixel_step, brightness)
+            if result is False:
+                return await self.invalid_request("wave failed")
 
         if tool == "copy":
             # copy the config of the specified virtual instance to all virtuals listed in the target payload

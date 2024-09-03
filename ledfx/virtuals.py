@@ -69,6 +69,11 @@ class Virtual:
                 default=0,
             ): int,
             vol.Optional(
+                "skip_odd",
+                description="Skip every odd pixel",
+                default=False,
+            ): bool,
+            vol.Optional(
                 "preview_only",
                 description="Preview the pixels without updating the devices",
                 default=False,
@@ -157,6 +162,8 @@ class Virtual:
         self._hl_end = 0
         self._hl_step = 1
         self._os_active = False
+        self._ripple_active = False
+        self._wave_active = False
         self.lock = threading.Lock()
         self.clear_handle = None
 
@@ -499,7 +506,7 @@ class Virtual:
             )
         )
 
-    def oneshot(self, color, ramp, hold, fade):
+    def oneshot(self, color, ramp, hold, fade, brightness):
         """
         Force all pixels in virtual to color over a time envelope defined in ms
         Following calls will override any active one shot
@@ -512,7 +519,7 @@ class Virtual:
             True if oneshot was activated, False if not
         """
         if self.active:
-            self._os_color = np.array(color, dtype=float)
+            self._os_color = np.array(color, dtype=float) * brightness
             self._os_ramp = ramp / 1000.0
             self._os_hold = hold / 1000.0
             self._os_fade = fade / 1000.0
@@ -542,6 +549,78 @@ class Virtual:
     def oneshot_apply(self, seg):
         blend = np.multiply(self._os_color, self._os_weight)
         np.multiply(seg, 1 - self._os_weight, seg)
+        np.add(seg, blend, seg)
+
+    def ripple(self, color, fade, probability, brightness):
+        if self.active:
+            self._ripple_color = np.array(color, dtype=float) * brightness
+            self._ripple_fade = fade / 1000.0
+            self._ripple_start = timeit.default_timer()
+            self._ripple_weight = 0.0
+            self._ripple_active = True
+            probabilities = np.random.uniform(size=self.pixel_count)
+            self._ripple_points = np.zeros(self.pixel_count)
+            self._ripple_points[probabilities > probability] = 1
+            self._ripple_counter = 0.0
+            result = True
+        else:
+            result = False
+        return result
+
+    def update_ripple(self):
+        passed = timeit.default_timer() - self._ripple_start
+        if passed < self._ripple_fade:
+            self._ripple_weight = (self._ripple_fade - passed) / self._ripple_fade
+            self._ripple_points *= self._ripple_weight
+            if passed > self._ripple_counter:
+                self._ripple_points = np.convolve(self._ripple_points, [0.5, 0, 0.5], mode="same")
+                self._ripple_counter += 0.05
+        else:
+            self._ripple_active = False
+            self._ripple_weight = 0.0
+
+    def ripple_apply(self, seg, start, stop):
+        points = np.expand_dims(self._ripple_points[start: stop], axis=1)
+        blend = np.multiply(np.expand_dims(self._ripple_color, axis=0), points)
+        np.multiply(seg, 1 - points, seg)
+        np.add(seg, blend, seg)
+
+    def wave(self, color, timestep, pixel_step, brightness):
+        if self.active:
+            self._wave_color = np.array(color, dtype=float) * brightness
+            self._wave_timestep = timestep
+            self._wave_pixel_step = pixel_step
+            self._wave_fade = self.pixel_count / self._wave_pixel_step * self._wave_timestep
+            self._wave_start = timeit.default_timer()
+            # self._wave_weight = 0.0
+            if not self._wave_active:
+                self._wave_points = np.zeros(self.pixel_count)
+            self._wave_points[:12] = [0.2, 0.2, 0.4, 0.4, 0.6, 0.6, 0.8, 0.8, 1.0, 1.0, 0.8, 0.8]
+            self._wave_active = True
+            self._wave_counter = 0.0
+            result = True
+        else:
+            result = False
+        return result
+
+    def update_wave(self):
+        passed = timeit.default_timer() - self._wave_start
+        if passed < self._wave_fade:
+            # self._wave_weight = (self._wave_fade - passed) / self._wave_fade
+            self._wave_weight = 1.0
+            self._wave_points *= self._wave_weight
+            if passed > self._wave_counter:
+                self._wave_points[self._wave_pixel_step:] = self._wave_points[:-self._wave_pixel_step]
+                self._wave_points[:self._wave_pixel_step] = 0.
+                self._wave_counter += 0.05
+        else:
+            self._wave_active = False
+            self._wave_weight = 0.0
+
+    def wave_apply(self, seg, start, stop):
+        points = np.expand_dims(self._wave_points[start: stop], axis=1)
+        blend = np.multiply(np.expand_dims(self._wave_color, axis=0), points)
+        np.multiply(seg, 1 - points, seg)
         np.add(seg, blend, seg)
 
     def set_calibration(self, calibration):
@@ -754,8 +833,15 @@ class Virtual:
         if pixels is None:
             pixels = self.assembled_frame
 
+        # Where we update oneshot
         if self._os_active:
             self.oneshot_weight()
+
+        if self._ripple_active:
+            self.update_ripple()
+
+        if self._wave_active:
+            self.update_wave()
 
         if self._config["mapping"] == "span":
             # In span mode we can calculate the final pixels once for all segments
@@ -781,8 +867,15 @@ class Virtual:
                             device_end,
                         ) in segments:
                             seg = pixels[start:stop:step]
+                            if self._config["skip_odd"]:
+                                seg[::2, :] = 0.
+                            # Where we override segment
                             if self._os_active:
                                 self.oneshot_apply(seg)
+                            if self._ripple_active:
+                                self.ripple_apply(seg, start, stop)
+                            if self._wave_active:
+                                self.wave_apply(seg, start, stop)
                             data.append((seg, device_start, device_end))
                     elif self._config["mapping"] == "copy":
                         for (
